@@ -8,13 +8,17 @@ import datetime
 import os
 import numpy
 import sys
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import random
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', choices=['qwen', 'llama'])
 parser.add_argument('--backend', choices=['vllm'])
 parser.add_argument('--batch', nargs='+', type=int, default=[1, 2, 4, 8, 16, 32, 64, 128])
-parser.add_argument('--endpoint')
+parser.add_argument('--endpoint', nargs="+")
 parser.add_argument('--duration', type=int, default=60)
+parser.add_argument('--debug', action='store_true')
 args = parser.parse_args()
 
 QWEN_PROMPT = '''<|im_start|>system
@@ -24,11 +28,11 @@ output from 1 to 100<|im_end|>
 <|im_start|>assistant
 '''
 
-def get_endpoint():
+def get_endpoint(endpoint):
     if args.backend == 'vllm':
-        return args.endpoint + '/worker_generate_stream'
+        return endpoint + '/worker_generate_stream'
     elif args.backend in ['tgi', 'lorax']:
-        return args.endpoint + '/generate'
+        return endpoint + '/generate'
 
 def get_body():
     prompt = ''
@@ -47,14 +51,15 @@ def get_body():
         }
 
 def count_token(chunk):
+    if args.debug:
+        print(repr(chunk))
     if args.backend == 'vllm':
-        # print(repr(chunk))
         return orjson.loads(chunk[:-1])['usage']['completion_tokens']
 
-async def requests_worker():
+async def requests_worker(endpoint: str):
     start = time.perf_counter()
-    async with httpx.AsyncClient(timeout=httpx.Timeout(5, read=None)) as client:
-        endpoint = get_endpoint()             
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=None, pool=None, write=None, read=None)) as client:
+        endpoint = get_endpoint(endpoint)             
         body = get_body()
         tokens = []
         ticks = []
@@ -75,15 +80,14 @@ async def requests_worker():
                     if chunk == '':
                         continue
                     tokens[-1] = count_token(chunk)
-                    
-async def main():
-    print(args)
-    final_result = []
-    for batch_no, batch in enumerate(args.batch):
+
+async def batch_worker(batches, endpoint):
+    result = []
+    for batch_no, batch in enumerate(batches):
         print(f'--- process with batch size {batch}')
         workers = []
         for i in range(batch):
-            workers.append(requests_worker())
+            workers.append(requests_worker(endpoint))
         total_tokens = 0
         first_token_latencies = []
         non_first_token_latency = []
@@ -98,7 +102,7 @@ async def main():
                 first_token_latencies.append(diff[0])
                 non_first_token_latency.extend(diff[1:])
                 
-        final_result.append({
+        result.append({
             'batch': batch,
             'total_token': total_tokens,
             'token_per_s': total_tokens / args.duration,
@@ -109,12 +113,31 @@ async def main():
             'avg_token_latency': statistics.mean(non_first_token_latency),
         })
         print()
-        print(final_result[-1])
-        final_result[-1]['raw_ticks'] = all_ticks
+        print(result[-1])
+        result[-1]['raw_ticks'] = all_ticks
         if batch_no < len(args.batch) - 1:
             await asyncio.sleep(5)
+    return result
 
-    
+def run_batch_worker(batches, endpoint):
+    random.shuffle(batches)
+    return asyncio.run(batch_worker(batches, endpoint))
+
+def main():
+    print(args)
+    final_result = []
+    endpoints = defaultdict(list)
+    for batch_no, batch in enumerate(sorted(args.batch)):
+        index = batch_no % len(args.endpoint)
+        endpoints[args.endpoint[index]].append(batch)
+    print(endpoints)
+    final_result = []
+    with ProcessPoolExecutor(max_workers=len(endpoints)) as pool:
+        futures = [pool.submit(run_batch_worker, batches, endpoint) for endpoint, batches in endpoints.items()]
+        for i in as_completed(futures):
+            print(i)
+            final_result.extend(i)
+
     os.makedirs('result', exist_ok=True)
     now_str = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     with open(f'result/{now_str}_{args.model}_{args.backend}.json', 'wb') as fp:
@@ -127,4 +150,4 @@ async def main():
         }))
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
