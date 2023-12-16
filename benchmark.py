@@ -14,7 +14,7 @@ import random
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', choices=['qwen', 'llama'])
-parser.add_argument('--backend', choices=['vllm'])
+parser.add_argument('--backend', choices=['vllm', 'lorax', 'tgi'])
 parser.add_argument('--batch', nargs='+', type=int, default=[1, 2, 4, 8, 16, 32, 64, 128])
 parser.add_argument('--endpoint', nargs="+")
 parser.add_argument('--duration', type=int, default=60)
@@ -28,11 +28,13 @@ output from 1 to 100<|im_end|>
 <|im_start|>assistant
 '''
 
+LLAMA_PROMPT = '''<s>[INST] output from 1 to 100 [/INST]'''
+
 def get_endpoint(endpoint):
     if args.backend == 'vllm':
         return endpoint + '/worker_generate_stream'
     elif args.backend in ['tgi', 'lorax']:
-        return endpoint + '/generate'
+        return endpoint + '/generate_stream'
 
 def get_body():
     prompt = ''
@@ -40,6 +42,9 @@ def get_body():
     if args.model == 'qwen':
         prompt = QWEN_PROMPT
         stop = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
+    elif args.model == 'llama':
+        prompt = LLAMA_PROMPT
+        stop = ["<s>"]
 
     if args.backend == 'vllm':
         return {
@@ -49,12 +54,22 @@ def get_body():
             "stop": stop,
             'echo': False,
         }
-
-def count_token(chunk):
-    if args.debug:
-        print(repr(chunk))
-    if args.backend == 'vllm':
-        return orjson.loads(chunk[:-1])['usage']['completion_tokens']
+    elif args.backend == 'lorax':
+        return {
+            'inputs': prompt,
+            'parameters': {
+                'max_new_tokens': 800,
+                'details': True,
+            }
+        }
+    elif args.backend == 'tgi':
+        return {
+            'inputs': prompt,
+            'parameters': {
+                'max_new_tokens': 800,
+                'return_full_text': True,
+            }
+        }
 
 async def requests_worker(endpoint: str):
     start = time.perf_counter()
@@ -63,6 +78,8 @@ async def requests_worker(endpoint: str):
         body = get_body()
         tokens = []
         ticks = []
+        if args.debug:
+            print(body)
 
         while True:
             ticks.append([time.perf_counter()])
@@ -79,7 +96,12 @@ async def requests_worker(endpoint: str):
                         return ticks, tokens
                     if chunk == '':
                         continue
-                    tokens[-1] = count_token(chunk)
+                    if args.debug:
+                        print(repr(chunk))
+                    if args.backend == 'vllm':
+                        tokens[-1] = orjson.loads(chunk[:-1])['usage']['completion_tokens']
+                    elif args.backend == 'tgi':
+                        tokens[-1] += 1
 
 async def batch_worker(batches, endpoint):
     result = []
@@ -135,8 +157,7 @@ def main():
     with ProcessPoolExecutor(max_workers=len(endpoints)) as pool:
         futures = [pool.submit(run_batch_worker, batches, endpoint) for endpoint, batches in endpoints.items()]
         for i in as_completed(futures):
-            print(i)
-            final_result.extend(i)
+            final_result.extend(i.result())
 
     os.makedirs('result', exist_ok=True)
     now_str = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
