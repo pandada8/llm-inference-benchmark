@@ -18,7 +18,9 @@ Llama 2 系列：
 * meta-llama/Llama-2-7b-chat-hf
 
 Qwen 系列：
-* WIP
+* Qwen/Qwen-7B-Chat
+* Qwen/Qwen-7B-Chat-Int4
+* TheBloke/Qwen-7B-Chat-AWQ
 
 Mistral 系列:
 * WIP
@@ -49,3 +51,9 @@ Mistral 系列:
 ![](images/llama2-7b-throughput.png)
 ![](images/llama2-7b-first-token-lat.png)
 ![](images/llama2-7b-avglat.png)
+
+### Qwen 7B
+
+![](images/qwen-7b-token_per_s.png)
+![](images/qwen-7b-avg_first_token_latency.png)
+![](images/qwen-7b-avg_token_latency.png)
